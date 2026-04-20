@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_invoice_unique ON public.claims(invoice_id);

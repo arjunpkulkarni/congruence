@@ -1,0 +1,2 @@
+UPDATE session_videos SET status = 'failed', analysis_status = 'failed', last_error = 'Test failure for retry validation' WHERE id = '47511abf-5e58-41d8-b0e5-34cf1a82ee1d';
+UPDATE analysis_jobs SET status = 'failed', last_error = 'Test failure for retry validation' WHERE session_video_id = '47511abf-5e58-41d8-b0e5-34cf1a82ee1d';

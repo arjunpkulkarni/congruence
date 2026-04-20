@@ -1,0 +1,111 @@
+name: Deploy to DigitalOcean
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.DROPLET_SSH_KEY }}
+        
+    - name: Add server to known hosts
+      run: |
+        ssh-keyscan -H ${{ secrets.DROPLET_IP }} >> ~/.ssh/known_hosts
+        
+    - name: Deploy to server
+      run: |
+        # Create deployment directory
+        ssh root@${{ secrets.DROPLET_IP }} "mkdir -p /opt/congruence"
+        
+        # Pre-deployment cleanup and disk check
+        ssh root@${{ secrets.DROPLET_IP }} << 'CLEANUP'
+          echo "=== Pre-deployment Cleanup ==="
+          
+          # Check disk space
+          DISK_USAGE=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
+          AVAILABLE_GB=$(df -BG / | tail -1 | awk '{print $4}' | sed 's/G//')
+          echo "Disk usage: ${DISK_USAGE}% (${AVAILABLE_GB}GB available)"
+          
+          # Auto-cleanup if disk usage > 80% or < 3GB available
+          if [ "$DISK_USAGE" -gt 80 ] || [ "$AVAILABLE_GB" -lt 3 ]; then
+            echo "Running automatic cleanup..."
+            
+            # Docker cleanup (frees most space)
+            echo "Cleaning Docker images and containers..."
+            docker system prune -af --volumes || true
+            
+            # Clean old sessions (keep last 10)
+            if [ -d "/opt/congruence/data/sessions" ]; then
+              cd /opt/congruence/data/sessions
+              ls -t | tail -n +11 | xargs -r rm -rf 2>/dev/null || true
+              echo "Cleaned old session data"
+            fi
+            
+            # Python cache cleanup
+            cd /opt/congruence
+            find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+            find . -type f -name "*.pyc" -delete 2>/dev/null || true
+            
+            # Report space after cleanup
+            DISK_AFTER=$(df -h / | tail -1 | awk '{print $4 " available"}')
+            echo "Disk space after cleanup: $DISK_AFTER"
+          else
+            echo "Disk space OK, skipping cleanup"
+          fi
+        CLEANUP
+        
+        # Sync code (excluding unnecessary files)
+        rsync -avz --delete \
+          --exclude 'venv/' \
+          --exclude '__pycache__/' \
+          --exclude 'data/sessions/*' \
+          --exclude '.git/' \
+          --exclude '*.pyc' \
+          --exclude '.env' \
+          ./ root@${{ secrets.DROPLET_IP }}:/opt/congruence/
+          
+        # Deploy application
+        ssh root@${{ secrets.DROPLET_IP }} << 'ENDSSH'
+          cd /opt/congruence
+          
+          # Create/update .env file with all secrets
+          echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" > .env
+          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> .env
+          echo "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" >> .env
+          echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> .env
+          
+          # Create data directories
+          mkdir -p data/sessions data/media
+          
+          # Stop and remove old containers/networks
+          docker compose down --remove-orphans || true
+          docker rm -f congruence-api || true
+          
+          # Build and deploy with Docker
+          docker compose build --no-cache
+          docker compose up -d
+          
+          # Wait for health check
+          sleep 10
+          curl -f http://localhost:8000/health || exit 1
+          
+          echo "Deployment successful!"
+        ENDSSH
+        
+    - name: Verify deployment
+      run: |
+        sleep 5
+        curl -f http://${{ secrets.DROPLET_IP }}:8000/health
+        echo "✅ Application is running successfully!"
+
+

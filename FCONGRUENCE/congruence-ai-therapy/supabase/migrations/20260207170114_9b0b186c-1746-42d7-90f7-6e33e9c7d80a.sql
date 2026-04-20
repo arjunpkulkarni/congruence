@@ -1,0 +1,1 @@
+ALTER TABLE public.session_analysis ENABLE ROW LEVEL SECURITY;
