@@ -14,6 +14,15 @@ import { supabase } from "@/integrations/supabase/client";
 import { ClinicalAnalysisBoxes, ClinicalAnalysisData } from './ClinicalAnalysisBoxes';
 import { ClinicalDocEditor } from './ClinicalDocEditor';
 import SessionNotes from './SessionNotes';
+import { useAuth } from '@/hooks/useAuth';
+import { useAutosaveClinicalNote } from '@/hooks/useAutosaveClinicalNote';
+import { exportNoteAsPdf, exportNoteAsDoc } from '@/lib/export-note';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 interface SessionSummary {
   duration?: number;
@@ -630,6 +639,29 @@ export const SessionReviewTimeline = ({
   const [liveAnalysis, setLiveAnalysis] = useState<Analysis | null>(null);
   const analysis = liveAnalysis ?? initialAnalysis;
 
+  // v1: clinical_notes is the source of truth for the editable SOAP body once it
+  // exists. When present, we render from this instead of session_analysis.
+  const [clinicalNote, setClinicalNote] = useState<{
+    id: string;
+    content_json: Record<string, unknown> | null;
+    content_markdown: string | null;
+    draft_source: "ai_generated" | "clinician_edited";
+    updated_at: string;
+  } | null>(null);
+
+  // patient_id needed for inserting a clinical_notes row on the first clinician edit.
+  const [patientId, setPatientId] = useState<string | null>(null);
+
+  const { user } = useAuth();
+  const therapistId = user?.id ?? null;
+
+  const autosave = useAutosaveClinicalNote({
+    sessionVideoId: initialAnalysis.session_video_id,
+    patientId,
+    therapistId,
+    enabled: true,
+  });
+
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState<ClinicalAnalysisData | null>(null);
   const [editMarkdown, setEditMarkdown] = useState("");
@@ -652,8 +684,8 @@ export const SessionReviewTimeline = ({
     const fetchData = async () => {
       console.log("🔄 [SessionReview] Fetching fresh analysis data for:", initialAnalysis.id);
 
-      // Fetch analysis + transcript in parallel
-      const [analysisResult, transcriptResult] = await Promise.all([
+      // Fetch analysis + transcript + clinical_notes in parallel
+      const [analysisResult, transcriptResult, clinicalNoteResult] = await Promise.all([
         supabase
           .from("session_analysis")
           .select("*, session_videos!inner(title, video_path, duration_seconds)")
@@ -661,16 +693,30 @@ export const SessionReviewTimeline = ({
           .single(),
         supabase
           .from("session_videos")
-          .select("transcript_text")
+          .select("transcript_text, patient_id")
           .eq("id", initialAnalysis.session_video_id)
+          .maybeSingle(),
+        supabase
+          .from("clinical_notes")
+          .select("id, content_json, content_markdown, draft_source, updated_at")
+          .eq("session_video_id", initialAnalysis.session_video_id)
           .maybeSingle(),
       ]);
 
       if (cancelled) return;
 
-      // Update transcript
+      // Update transcript + patient_id
       if (transcriptResult.data?.transcript_text) {
         setTranscript(transcriptResult.data.transcript_text);
+      }
+      if (transcriptResult.data?.patient_id) {
+        setPatientId(transcriptResult.data.patient_id);
+      }
+
+      // Update clinical_notes (source of truth when present). Don't clobber with
+      // null during polling — only set when we have data.
+      if (clinicalNoteResult.data) {
+        setClinicalNote(clinicalNoteResult.data as typeof clinicalNote);
       }
 
       if (analysisResult.error) {
@@ -709,6 +755,8 @@ export const SessionReviewTimeline = ({
     if (!open) {
       setLiveAnalysis(null);
       setTranscript(null);
+      setClinicalNote(null);
+      setPatientId(null);
     }
   }, [open]);
 
@@ -766,7 +814,24 @@ export const SessionReviewTimeline = ({
 
   const duration = sessionSummary?.duration || 0;
   const incongruenceScore = sessionSummary?.overall_congruence;
-  const rawNotes = analysis.suggested_next_steps?.[0] || NO_LLM_NOTES_PLACEHOLDER;
+
+  // v1 read contract: prefer clinical_notes when present (this is the clinician-
+  // editable source of truth). Fall back to session_analysis.suggested_next_steps
+  // only if no clinical_notes row exists yet (e.g. legacy sessions). When we fall
+  // back, the row will be created lazily on first edit.
+  const rawNotes = useMemo(() => {
+    if (clinicalNote?.content_json && Object.keys(clinicalNote.content_json).length > 0) {
+      try {
+        return JSON.stringify(clinicalNote.content_json);
+      } catch {
+        // Fall through to markdown / analysis
+      }
+    }
+    if (clinicalNote?.content_markdown && clinicalNote.content_markdown.trim().length > 0) {
+      return clinicalNote.content_markdown;
+    }
+    return analysis.suggested_next_steps?.[0] || NO_LLM_NOTES_PLACEHOLDER;
+  }, [clinicalNote, analysis.suggested_next_steps]);
 
   useEffect(() => {
     if (!open) return;
@@ -919,26 +984,52 @@ export const SessionReviewTimeline = ({
     setIsEditing(true);
   };
 
+  // v1 autosave: while the editor is open, every change to editData/editMarkdown
+  // is debounced-written to clinical_notes. Source of truth shifts from
+  // session_analysis to clinical_notes the moment the clinician edits.
+  useEffect(() => {
+    if (!isEditing) return;
+    if (!patientId || !therapistId) return; // need these to write
+
+    const contentJson: Record<string, unknown> = editData
+      ? (editData as unknown as Record<string, unknown>)
+      : { _raw_markdown: editMarkdown };
+    const contentMarkdown = editData ? JSON.stringify(editData) : editMarkdown;
+
+    autosave.save(contentJson, contentMarkdown);
+    // autosave is stable via useCallback refs; no need to depend on it
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing, editData, editMarkdown, patientId, therapistId]);
+
   const handleSaveEdit = async () => {
     setIsSaving(true);
-    const newContent = editData ? JSON.stringify(editData) : editMarkdown;
-    const { error } = await supabase
-      .from("session_analysis")
-      .update({ suggested_next_steps: [newContent] })
-      .eq("id", analysis.id);
-
-    if (error) {
-      toast.error("Failed to save changes");
-      console.error("Update error:", error);
-    } else {
-      toast.success("Clinical documentation updated");
-      if (analysis.suggested_next_steps) {
-        analysis.suggested_next_steps[0] = newContent;
+    try {
+      await autosave.flush();
+      if (autosave.status === "error") {
+        toast.error("Some changes couldn't be saved — will retry when online");
+      } else {
+        toast.success("Clinical documentation saved");
       }
+
+      // Optimistically reflect the edit in the local clinical_notes state so the
+      // rendered (non-editing) view shows the new content without a round-trip.
+      const contentJson: Record<string, unknown> = editData
+        ? (editData as unknown as Record<string, unknown>)
+        : { _raw_markdown: editMarkdown };
+      const contentMarkdown = editData ? JSON.stringify(editData) : editMarkdown;
+      setClinicalNote((prev) => ({
+        id: prev?.id ?? "pending",
+        content_json: contentJson,
+        content_markdown: contentMarkdown,
+        draft_source: "clinician_edited",
+        updated_at: new Date().toISOString(),
+      }));
+
       setIsEditing(false);
       setEditData(null);
+    } finally {
+      setIsSaving(false);
     }
-    setIsSaving(false);
   };
 
   const handleCopyTranscript = useCallback(() => {
@@ -982,6 +1073,24 @@ export const SessionReviewTimeline = ({
   const llmNotes = formatTherapistNotes(rawNotes);
   const structuredAnalysis = parsedStructured;
 
+  const handleExportNote = useCallback((format: "pdf" | "doc") => {
+    const title = analysis.session_videos?.title || "Session";
+    const dateIso = analysis.created_at;
+    // Prefer the already-rendered markdown (llmNotes) which handles all the
+    // JSON-to-markdown shaping. If empty, fall back to whatever raw text we have.
+    const markdown = (llmNotes && llmNotes.trim()) ? llmNotes : rawNotes;
+    if (!markdown || markdown.trim().length === 0) {
+      toast.error("Nothing to export yet");
+      return;
+    }
+    if (format === "pdf") {
+      exportNoteAsPdf({ title, dateIso, markdown });
+    } else {
+      exportNoteAsDoc({ title, dateIso, markdown });
+      toast.success("Note downloaded as .doc");
+    }
+  }, [analysis.session_videos?.title, analysis.created_at, llmNotes, rawNotes]);
+
   return (
     <Dialog open={open} onOpenChange={onClose}>
       <DialogContent className="max-w-[100vw] max-h-[100vh] w-[100vw] h-[100vh] p-0 bg-white border-0 gap-0 overflow-hidden rounded-none m-0">
@@ -1007,6 +1116,14 @@ export const SessionReviewTimeline = ({
               <div className="flex items-center gap-2">
                 {isEditing ? (
                   <>
+                    <span className="text-[11px] text-slate-300 mr-2 min-w-[100px] text-right">
+                      {autosave.status === "saving" && "Saving…"}
+                      {autosave.status === "saved" && autosave.savedAt &&
+                        `Saved ${autosave.savedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}
+                      {autosave.status === "offline" && "Offline — will sync"}
+                      {autosave.status === "error" && "Retrying…"}
+                      {autosave.status === "idle" && ""}
+                    </span>
                     <Button
                       size="sm"
                       variant="outline"
@@ -1015,7 +1132,7 @@ export const SessionReviewTimeline = ({
                       className="h-7 text-xs gap-1 bg-white text-slate-900 border-slate-300 hover:bg-slate-100"
                     >
                       {isSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
-                      Save
+                      Done
                     </Button>
                     <Button
                       size="sm"
@@ -1047,6 +1164,26 @@ export const SessionReviewTimeline = ({
                       <Pencil className="h-3 w-3" />
                       Edit Report
                     </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs gap-1 bg-white text-slate-900 border-slate-300 hover:bg-slate-100"
+                        >
+                          <Download className="h-3 w-3" />
+                          Export
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => handleExportNote("pdf")}>
+                          Save as PDF
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleExportNote("doc")}>
+                          Download as Word (.doc)
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                     <button
                       onClick={onClose}
                       className="ml-2 p-1.5 hover:bg-slate-700 border border-slate-600 transition-colors"

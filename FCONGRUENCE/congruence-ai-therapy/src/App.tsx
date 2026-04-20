@@ -46,6 +46,7 @@ import AdminPortalAssignments from "./pages/AdminPortalAssignments";
 import AdminPortalAuditLogs from "./pages/AdminPortalAuditLogs";
 import AdminPortalMetrics from "./pages/AdminPortalMetrics";
 import Copilot from "./pages/Copilot";
+import { FeatureGate } from "@/components/FeatureGate";
 
 const queryClient = new QueryClient();
 
@@ -80,25 +81,25 @@ const App = () => {
             <Route path="/privacy" element={<PrivacyPolicy />} />
             <Route path="/terms" element={<TermsOfService />} />
             <Route path="/" element={<Landing />} />
-            <Route path="/clinical-insights" element={<ClinicalInsights />} />
+            <Route path="/clinical-insights" element={<FeatureGate flag="clinicalInsights"><ClinicalInsights /></FeatureGate>} />
             <Route path="/auth" element={<Auth />} />
             {/* Authenticated routes with sidebar */}
             <Route path="/dashboard" element={<AuthenticatedLayout><Dashboard /></AuthenticatedLayout>} />
             <Route path="/patient/:patientId" element={<AuthenticatedLayout><PatientWorkspace /></AuthenticatedLayout>} />
-            <Route path="/appointments" element={<AuthenticatedLayout><Appointments /></AuthenticatedLayout>} />
-            <Route path="/billing" element={<AuthenticatedLayout><BillingDashboard /></AuthenticatedLayout>} />
-            <Route path="/billing/commissions" element={<AuthenticatedLayout><CommissionSplits /></AuthenticatedLayout>} />
-            <Route path="/billing/invoices/new" element={<AuthenticatedLayout><CreateInvoice /></AuthenticatedLayout>} />
-            <Route path="/billing/invoices/:id" element={<AuthenticatedLayout><InvoiceDetail /></AuthenticatedLayout>} />
-            <Route path="/billing/invoices/:id/edit" element={<AuthenticatedLayout><CreateInvoice /></AuthenticatedLayout>} />
+            <Route path="/appointments" element={<AuthenticatedLayout><FeatureGate flag="booking"><Appointments /></FeatureGate></AuthenticatedLayout>} />
+            <Route path="/billing" element={<AuthenticatedLayout><FeatureGate flag="billing"><BillingDashboard /></FeatureGate></AuthenticatedLayout>} />
+            <Route path="/billing/commissions" element={<AuthenticatedLayout><FeatureGate flag="billing"><CommissionSplits /></FeatureGate></AuthenticatedLayout>} />
+            <Route path="/billing/invoices/new" element={<AuthenticatedLayout><FeatureGate flag="billing"><CreateInvoice /></FeatureGate></AuthenticatedLayout>} />
+            <Route path="/billing/invoices/:id" element={<AuthenticatedLayout><FeatureGate flag="billing"><InvoiceDetail /></FeatureGate></AuthenticatedLayout>} />
+            <Route path="/billing/invoices/:id/edit" element={<AuthenticatedLayout><FeatureGate flag="billing"><CreateInvoice /></FeatureGate></AuthenticatedLayout>} />
             <Route path="/profile" element={<AuthenticatedLayout><Profile /></AuthenticatedLayout>} />
-            <Route path="/reports" element={<AuthenticatedLayout><Reports /></AuthenticatedLayout>} />
+            <Route path="/reports" element={<AuthenticatedLayout><FeatureGate flag="reports"><Reports /></FeatureGate></AuthenticatedLayout>} />
             <Route path="/staff" element={<AuthenticatedLayout><StaffList /></AuthenticatedLayout>} />
-            <Route path="/purchases" element={<AuthenticatedLayout><Purchases /></AuthenticatedLayout>} />
+            <Route path="/purchases" element={<AuthenticatedLayout><FeatureGate flag="billing"><Purchases /></FeatureGate></AuthenticatedLayout>} />
             <Route path="/security" element={<AuthenticatedLayout><Security /></AuthenticatedLayout>} />
-            <Route path="/integrations" element={<AuthenticatedLayout><Integrations /></AuthenticatedLayout>} />
+            <Route path="/integrations" element={<AuthenticatedLayout><FeatureGate flag="integrations"><Integrations /></FeatureGate></AuthenticatedLayout>} />
             <Route path="/settings" element={<AuthenticatedLayout><GeneralSettings /></AuthenticatedLayout>} />
-            <Route path="/copilot" element={<AuthenticatedLayout><Copilot /></AuthenticatedLayout>} />
+            <Route path="/copilot" element={<AuthenticatedLayout><FeatureGate flag="copilot"><Copilot /></FeatureGate></AuthenticatedLayout>} />
             {/* Admin-only routes */}
             <Route path="/team" element={<AuthenticatedLayout><AdminRouteGuard><Team /></AdminRouteGuard></AuthenticatedLayout>} />
             <Route path="/assignments" element={<AuthenticatedLayout><AdminRouteGuard><Assignments /></AdminRouteGuard></AuthenticatedLayout>} />

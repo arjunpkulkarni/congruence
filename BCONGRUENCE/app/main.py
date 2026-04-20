@@ -50,9 +50,15 @@ from app.services.simplified_notes import (
     generate_simplified_notes,
     save_simplified_outputs,
 )
-from app.services.notes import generate_therapist_notes, generate_therapist_notes_with_style, save_therapist_notes
+from app.services.notes import (
+    generate_therapist_notes,
+    generate_therapist_notes_with_style,
+    save_therapist_notes,
+    _convert_notes_to_markdown,
+)
 from app.services.fact_extraction import extract_facts_from_therapist_notes, extract_facts_from_analysis
 from app.services.clinical_state import update_patient_clinical_state
+from app.services.clinical_notes_store import upsert_ai_generated_clinical_note
 from app.services.agent import get_agent
 from app.services.database import get_conversation_db
 from app.services.data_access import (
@@ -455,7 +461,7 @@ def _run_session_job(job_id: str, payload: ProcessSessionRequest) -> None:
                     db = get_conversation_db()
                     if db.is_enabled():
                         video_query = db.client.table("session_videos")\
-                            .select("id")\
+                            .select("id, therapist_id")\
                             .eq("patient_id", payload.patient_id)\
                             .order("created_at", desc=True)\
                             .limit(1)\
@@ -463,22 +469,46 @@ def _run_session_job(job_id: str, payload: ProcessSessionRequest) -> None:
 
                         if video_query.data:
                             session_video_id = video_query.data[0]["id"]
-                            if therapist_notes:
-                                extract_facts_from_therapist_notes(
-                                    session_video_id=session_video_id,
-                                    patient_id=payload.patient_id,
-                                    therapist_notes=therapist_notes,
-                                )
-                            elif session_summary:
-                                extract_facts_from_analysis(
-                                    session_video_id=session_video_id,
-                                    patient_id=payload.patient_id,
-                                    session_summary=session_summary,
-                                )
-                            logger.info("✅ DATABASE UPLOAD: Session facts uploaded successfully")
-                            logger.info("Updating patient clinical state...")
-                            update_patient_clinical_state(patient_id=payload.patient_id)
-                            logger.info("✅ DATABASE UPLOAD: Patient clinical state updated")
+                            therapist_id = video_query.data[0].get("therapist_id")
+
+                            # v1: persist AI draft into clinical_notes so the clinician
+                            # can edit and come back to it. Safe vs. clinician edits.
+                            if therapist_notes and therapist_id:
+                                try:
+                                    content_markdown = _convert_notes_to_markdown(therapist_notes)
+                                    upsert_ai_generated_clinical_note(
+                                        session_video_id=session_video_id,
+                                        patient_id=payload.patient_id,
+                                        therapist_id=therapist_id,
+                                        therapist_notes=therapist_notes,
+                                        content_markdown=content_markdown,
+                                    )
+                                except Exception as exc:
+                                    logger.exception("clinical_notes upsert failed (non-critical): %s", exc)
+
+                            # v2 pipeline (session_facts + patient_clinical_state) —
+                            # gated off by default. Turn on with ENABLE_CLINICAL_STATE_V2=true
+                            # once the clinical intelligence features are ready to ship.
+                            if os.getenv("ENABLE_CLINICAL_STATE_V2", "false").lower() == "true":
+                                if therapist_notes:
+                                    extract_facts_from_therapist_notes(
+                                        session_video_id=session_video_id,
+                                        patient_id=payload.patient_id,
+                                        therapist_notes=therapist_notes,
+                                    )
+                                elif session_summary:
+                                    extract_facts_from_analysis(
+                                        session_video_id=session_video_id,
+                                        patient_id=payload.patient_id,
+                                        session_summary=session_summary,
+                                    )
+                                logger.info("✅ DATABASE UPLOAD: Session facts uploaded successfully")
+                                logger.info("Updating patient clinical state...")
+                                update_patient_clinical_state(patient_id=payload.patient_id)
+                                logger.info("✅ DATABASE UPLOAD: Patient clinical state updated")
+                            else:
+                                logger.info("Clinical state v2 disabled (ENABLE_CLINICAL_STATE_V2=false) — skipping fact extraction")
+
                             processing_status.update({"database_upload_success": True})
                             break
                         else:

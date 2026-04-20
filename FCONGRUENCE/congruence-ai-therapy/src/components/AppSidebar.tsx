@@ -32,6 +32,7 @@ import {
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate } from "react-router-dom";
 import { useAdminCheck } from "@/hooks/useAdminCheck";
+import { featureFlags } from "@/lib/feature-flags";
 import congruenceLogo from "@/assets/congruence-logo.png";
 import type { User } from "@supabase/supabase-js";
 
@@ -39,9 +40,10 @@ const primaryNav = [
   { title: "Patients", url: "/dashboard", icon: Users },
 ];
 
+// v2 nav items — hidden in v1 unless the corresponding feature flag is on.
 const adminOnlyNav = [
-  { title: "Appointments", url: "/appointments", icon: Calendar },
-  { title: "Billing", url: "/billing", icon: CreditCard },
+  ...(featureFlags.booking ? [{ title: "Appointments", url: "/appointments", icon: Calendar }] : []),
+  ...(featureFlags.billing ? [{ title: "Billing", url: "/billing", icon: CreditCard }] : []),
 ];
 
 const adminNav = [
@@ -142,7 +144,7 @@ export function AppSidebar({ currentUser }: AppSidebarProps) {
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 ))}
-                {isSuperAdmin && (
+                {isSuperAdmin && featureFlags.copilot && (
                   <SidebarMenuItem>
                     <SidebarMenuButton asChild>
                       <NavLink
