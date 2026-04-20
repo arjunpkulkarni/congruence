@@ -27,7 +27,7 @@ import {
 } from "@/components/dashboard";
 import { StartSessionModal } from "@/components/StartSessionModal";
 import { toast } from "sonner";
-import { Loader2, Activity, Plus, Video } from "lucide-react";
+import { Loader2, Activity, Plus, Video, Users, CalendarClock } from "lucide-react";
 import type { User, Session } from "@supabase/supabase-js";
 
 const PINNED_STORAGE_KEY = "congruence_pinned_patients";
@@ -502,9 +502,48 @@ const Dashboard = () => {
       <div className="px-8 py-4 bg-slate-50">
         <div className="max-w-[1400px] mx-auto">
           <Tabs defaultValue="patients" className="w-full">
-            <TabsList className="mb-4">
-              <TabsTrigger value="patients">Patients</TabsTrigger>
-              <TabsTrigger value="follow-ups">Follow-ups</TabsTrigger>
+            <TabsList
+              className="mb-6 h-auto w-full justify-start gap-1 rounded-none border-b border-slate-200 bg-transparent p-0 text-slate-500"
+            >
+              <TabsTrigger
+                value="patients"
+                className={
+                  "group relative h-11 gap-2 rounded-none border-b-2 border-transparent " +
+                  "bg-transparent px-4 text-sm font-medium text-slate-600 shadow-none ring-offset-0 " +
+                  "transition-colors hover:text-slate-900 focus-visible:ring-0 " +
+                  "data-[state=active]:border-slate-900 data-[state=active]:bg-transparent " +
+                  "data-[state=active]:font-semibold data-[state=active]:text-slate-900 " +
+                  "data-[state=active]:shadow-none"
+                }
+              >
+                <Users className="h-4 w-4 text-slate-400 transition-colors group-data-[state=active]:text-slate-900" />
+                Patients
+                <span
+                  className={
+                    "ml-1 inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full px-1.5 " +
+                    "text-[11px] font-semibold tabular-nums transition-colors " +
+                    "bg-slate-100 text-slate-600 " +
+                    "group-data-[state=active]:bg-slate-900 group-data-[state=active]:text-white"
+                  }
+                  aria-label={`${sortedDisplayPatients.length} patients`}
+                >
+                  {sortedDisplayPatients.length}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="follow-ups"
+                className={
+                  "group relative h-11 gap-2 rounded-none border-b-2 border-transparent " +
+                  "bg-transparent px-4 text-sm font-medium text-slate-600 shadow-none ring-offset-0 " +
+                  "transition-colors hover:text-slate-900 focus-visible:ring-0 " +
+                  "data-[state=active]:border-slate-900 data-[state=active]:bg-transparent " +
+                  "data-[state=active]:font-semibold data-[state=active]:text-slate-900 " +
+                  "data-[state=active]:shadow-none"
+                }
+              >
+                <CalendarClock className="h-4 w-4 text-slate-400 transition-colors group-data-[state=active]:text-slate-900" />
+                Follow-ups
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="patients" className="mt-0">

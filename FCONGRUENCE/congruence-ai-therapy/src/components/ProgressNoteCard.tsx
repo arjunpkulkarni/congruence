@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { BookOpen, Copy, Plus, Trash2 } from "lucide-react";
+import { BookOpen, Copy, Pencil, Plus, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
@@ -26,8 +26,12 @@ interface Props {
 }
 
 /**
- * A borderless, auto-growing textarea that looks like a paragraph of prose.
- * We deliberately use textarea (not contentEditable) because React + controlled
+ * Auto-growing textarea that reads as a paragraph of prose but, in edit mode,
+ * carries a persistent dashed border + pale background so the clinician can see
+ * at a glance *which regions are editable*. Focus hardens into a solid blue ring
+ * so the currently-active field is unambiguous.
+ *
+ * We deliberately use <textarea> (not contentEditable) because React + controlled
  * contentEditable is notoriously finicky with cursor/selection state, and for
  * clinical documentation we care about keystroke reliability above all else.
  */
@@ -55,8 +59,6 @@ const InlineText = ({
     el.style.height = `${el.scrollHeight}px`;
   };
 
-  // Size on first layout + whenever the value changes (including programmatic
-  // updates from the parent). useLayoutEffect avoids a visible flicker.
   useLayoutEffect(() => {
     resize();
   }, [value]);
@@ -76,19 +78,41 @@ const InlineText = ({
       aria-label={ariaLabel}
       rows={minRows}
       className={
-        "block w-full resize-none bg-transparent outline-none border border-transparent " +
-        "rounded -mx-2 px-2 py-1 leading-relaxed transition-colors " +
-        "hover:bg-slate-50 focus:bg-white focus:border-blue-200 focus:ring-2 focus:ring-blue-100 " +
+        // Persistent dashed affordance so the clinician can instantly see what
+        // is editable. Hover deepens the bg, focus snaps to a solid blue ring.
+        "block w-full resize-none outline-none " +
+        "rounded-md px-3 py-2 leading-relaxed transition-colors " +
+        "bg-blue-50/40 border border-dashed border-blue-300 " +
+        "hover:bg-blue-50 hover:border-blue-400 " +
+        "focus:bg-white focus:border-blue-500 focus:border-solid focus:ring-2 focus:ring-blue-200 " +
+        "placeholder:text-slate-400 " +
         className
       }
     />
   );
 };
 
-const SectionLabel = ({ children }: { children: React.ReactNode }) => (
-  <h4 className="text-xs font-semibold text-slate-900 uppercase tracking-wider mb-2">
-    {children}
-  </h4>
+const SectionLabel = ({
+  children,
+  editable,
+}: {
+  children: React.ReactNode;
+  editable?: boolean;
+}) => (
+  <div className="flex items-center gap-1.5 mb-2">
+    <h4 className="text-xs font-semibold text-slate-900 uppercase tracking-wider">
+      {children}
+    </h4>
+    {editable && (
+      <span
+        className="inline-flex items-center gap-0.5 text-[10px] font-medium text-blue-600 bg-blue-50 rounded px-1.5 py-0.5 uppercase tracking-wide"
+        aria-label="Editable"
+      >
+        <Pencil className="h-2.5 w-2.5" />
+        Edit
+      </span>
+    )}
+  </div>
 );
 
 export const ProgressNoteCard = ({ data, editable = false, onChange }: Props) => {
@@ -141,11 +165,29 @@ export const ProgressNoteCard = ({ data, editable = false, onChange }: Props) =>
       (Array.isArray(ts.decisions_made) && ts.decisions_made.length > 0));
 
   return (
-    <div className="border border-slate-300 bg-white mb-6">
-      <div className="bg-slate-900 px-4 py-2.5 border-b border-slate-800 flex items-center justify-between">
-        <h3 className="text-xs font-semibold text-white uppercase tracking-wider">
-          <BookOpen className="inline h-3.5 w-3.5 mr-2" />
-          SOAP Clinical Notes
+    <div
+      className={
+        "bg-white mb-6 transition-shadow " +
+        (editable
+          ? "border-2 border-blue-500 shadow-[0_0_0_4px_rgba(59,130,246,0.10)]"
+          : "border border-slate-300")
+      }
+    >
+      <div
+        className={
+          "px-4 py-2.5 border-b flex items-center justify-between transition-colors " +
+          (editable
+            ? "bg-blue-600 border-blue-700"
+            : "bg-slate-900 border-slate-800")
+        }
+      >
+        <h3 className="text-xs font-semibold text-white uppercase tracking-wider flex items-center">
+          {editable ? (
+            <Pencil className="inline h-3.5 w-3.5 mr-2" />
+          ) : (
+            <BookOpen className="inline h-3.5 w-3.5 mr-2" />
+          )}
+          {editable ? "Editing SOAP Clinical Notes" : "SOAP Clinical Notes"}
         </h3>
         {!editable && (
           <Button
@@ -157,12 +199,32 @@ export const ProgressNoteCard = ({ data, editable = false, onChange }: Props) =>
             <Copy className="h-3 w-3" /> Copy All
           </Button>
         )}
+        {editable && (
+          <span className="text-[11px] text-blue-100 flex items-center gap-1.5">
+            <Sparkles className="h-3 w-3" />
+            Autosaving
+          </span>
+        )}
       </div>
+
+      {/* Edit-mode helper banner: tells the clinician at a glance that every
+          blue-dashed region is editable and the plan is list-based. */}
+      {editable && (
+        <div className="bg-blue-50/70 border-b border-blue-200 px-5 py-2.5 text-xs text-blue-900 flex items-start gap-2">
+          <Pencil className="h-3.5 w-3.5 mt-0.5 shrink-0 text-blue-600" />
+          <div>
+            <span className="font-semibold">Edit mode.</span> Click any blue-outlined
+            region to revise the clinical text. In the Plan section, edit each item
+            in place, remove with the trash icon, or use{" "}
+            <span className="font-medium">+ Add item</span> to append a new one. Changes save automatically.
+          </div>
+        </div>
+      )}
 
       <div className="p-6 space-y-8">
         {hasIdentifying && (
           <section>
-            <SectionLabel>Identifying Data</SectionLabel>
+            <SectionLabel editable={editable}>Identifying Data</SectionLabel>
             {editable ? (
               <InlineText
                 value={data.identifying_data}
@@ -177,7 +239,7 @@ export const ProgressNoteCard = ({ data, editable = false, onChange }: Props) =>
         )}
 
         <section>
-          <SectionLabel>S — Subjective</SectionLabel>
+          <SectionLabel editable={editable}>S — Subjective</SectionLabel>
           {editable ? (
             <InlineText
               value={data.subjective}
@@ -194,7 +256,7 @@ export const ProgressNoteCard = ({ data, editable = false, onChange }: Props) =>
         </section>
 
         <section>
-          <SectionLabel>O — Objective (Mental Status)</SectionLabel>
+          <SectionLabel editable={editable}>O — Objective (Mental Status)</SectionLabel>
           {editable ? (
             <InlineText
               value={data.mental_status_exam}
@@ -211,7 +273,7 @@ export const ProgressNoteCard = ({ data, editable = false, onChange }: Props) =>
         </section>
 
         <section>
-          <SectionLabel>A — Assessment</SectionLabel>
+          <SectionLabel editable={editable}>A — Assessment</SectionLabel>
           {editable ? (
             <InlineText
               value={data.assessment}
@@ -228,15 +290,29 @@ export const ProgressNoteCard = ({ data, editable = false, onChange }: Props) =>
         </section>
 
         <section>
-          <SectionLabel>P — Plan</SectionLabel>
+          <SectionLabel editable={editable}>P — Plan</SectionLabel>
           {!editable && data.plan.length === 0 && (
             <p className="text-sm text-slate-500 italic">Not discussed in this session.</p>
           )}
           {data.plan.length > 0 && (
-            <ul className="space-y-1.5">
+            <ul className={"space-y-" + (editable ? "2" : "1.5")}>
               {data.plan.map((item, idx) => (
-                <li key={idx} className="flex items-start gap-2">
-                  <span className="text-blue-600 mt-1.5 shrink-0 text-xs">●</span>
+                <li
+                  key={idx}
+                  className={
+                    editable
+                      ? "flex items-start gap-2 group"
+                      : "flex items-start gap-2"
+                  }
+                >
+                  <span
+                    className={
+                      "shrink-0 text-xs " +
+                      (editable ? "text-blue-500 mt-3" : "text-blue-600 mt-1.5")
+                    }
+                  >
+                    ●
+                  </span>
                   {editable ? (
                     <>
                       <div className="flex-1 min-w-0">
@@ -251,8 +327,9 @@ export const ProgressNoteCard = ({ data, editable = false, onChange }: Props) =>
                       <button
                         type="button"
                         onClick={() => removePlanItem(idx)}
-                        className="text-slate-400 hover:text-red-600 p-1 shrink-0 rounded transition-colors"
+                        className="text-slate-400 hover:text-red-600 hover:bg-red-50 p-1.5 shrink-0 rounded transition-colors mt-1"
                         aria-label={`Remove plan item ${idx + 1}`}
+                        title="Remove item"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -268,12 +345,12 @@ export const ProgressNoteCard = ({ data, editable = false, onChange }: Props) =>
           )}
           {editable && (
             <Button
-              variant="ghost"
+              variant="outline"
               size="sm"
               onClick={addPlanItem}
-              className="h-7 mt-3 gap-1 text-xs text-slate-600 hover:text-slate-900"
+              className="h-8 mt-3 gap-1.5 text-xs border-dashed border-blue-300 text-blue-700 hover:bg-blue-50 hover:border-blue-500"
             >
-              <Plus className="h-3 w-3" /> Add item
+              <Plus className="h-3.5 w-3.5" /> Add plan item
             </Button>
           )}
         </section>
@@ -281,6 +358,11 @@ export const ProgressNoteCard = ({ data, editable = false, onChange }: Props) =>
         {hasTranscriptSummary && (
           <section className="pt-4 border-t border-slate-200">
             <SectionLabel>Clinical Summary</SectionLabel>
+            {editable && (
+              <p className="text-[11px] text-slate-500 mb-2 italic">
+                Read-only — generated from the transcript.
+              </p>
+            )}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
               {Array.isArray(ts?.key_themes) && ts!.key_themes!.length > 0 && (
                 <div>
