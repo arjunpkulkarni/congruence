@@ -84,13 +84,24 @@ def _transcribe_chunk_openai(chunk_path: str, start_offset: float, language: str
     segments: List[Dict[str, Any]] = []
     text_parts: List[str] = []
 
+    # The OpenAI Python SDK (>=1.x) returns pydantic model objects for each
+    # segment (TranscriptionSegment), not dicts. Support both shapes so we stay
+    # compatible with older SDK versions and with any code that mocks dicts.
+    def _read(seg: Any, key: str, default: Any = "") -> Any:
+        if isinstance(seg, dict):
+            return seg.get(key, default)
+        return getattr(seg, key, default)
+
     for seg in getattr(resp, "segments", []) or []:
+        start_val = _read(seg, "start", 0.0)
+        end_val = _read(seg, "end", 0.0)
+        text_val = _read(seg, "text", "") or ""
         segments.append({
-            "start": float(seg["start"]) + start_offset,
-            "end": float(seg["end"]) + start_offset,
-            "text": seg.get("text", ""),
+            "start": float(start_val) + start_offset,
+            "end": float(end_val) + start_offset,
+            "text": text_val,
         })
-        t = seg.get("text", "").strip()
+        t = text_val.strip()
         if t:
             text_parts.append(t)
 

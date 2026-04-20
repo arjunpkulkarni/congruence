@@ -2,7 +2,6 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { FileText, X, Pencil, Check, Loader2, Copy, Download, ChevronDown, ChevronUp, MessageSquare, Eye, Search, StickyNote, BookOpen, Play, Volume2 } from "lucide-react";
@@ -10,9 +9,12 @@ import { getActiveNoteStyle, type NoteStyleData } from "@/components/settings/No
 import { toast } from "sonner";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { marked } from 'marked';
+import TurndownService from 'turndown';
 import { supabase } from "@/integrations/supabase/client";
 import { ClinicalAnalysisBoxes, ClinicalAnalysisData } from './ClinicalAnalysisBoxes';
-import { ClinicalDocEditor } from './ClinicalDocEditor';
+import { RichTextEditor } from './RichTextEditor';
+import { ProgressNoteCard, ProgressNoteData } from './ProgressNoteCard';
 import SessionNotes from './SessionNotes';
 import { useAuth } from '@/hooks/useAuth';
 import { useAutosaveClinicalNote } from '@/hooks/useAutosaveClinicalNote';
@@ -133,6 +135,144 @@ interface SessionReviewTimelineProps {
 /** Placeholder when `suggested_next_steps` is empty — not JSON; must not be passed to JSON.parse */
 const NO_LLM_NOTES_PLACEHOLDER = "No LLM notes available";
 
+// Markdown <-> HTML converters for the rich text editor. Configured once at
+// module scope — both are stateless after construction.
+const turndownService = new TurndownService({
+  headingStyle: "atx",
+  bulletListMarker: "-",
+  codeBlockStyle: "fenced",
+  emDelimiter: "_",
+});
+
+const markdownToHtml = (md: string): string => {
+  if (!md) return "";
+  try {
+    // `marked.parse` is sync when called without options that force async
+    const html = marked.parse(md, { async: false, gfm: true, breaks: false }) as string;
+    return html;
+  } catch (e) {
+    console.warn("[SessionReview] markdownToHtml failed, using raw text:", e);
+    return `<p>${md.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] || c))}</p>`;
+  }
+};
+
+const htmlToMarkdown = (html: string): string => {
+  if (!html) return "";
+  try {
+    return turndownService.turndown(html);
+  } catch (e) {
+    console.warn("[SessionReview] htmlToMarkdown failed:", e);
+    return html;
+  }
+};
+
+/**
+ * Extract a ProgressNoteData object from whatever we stored in clinical_notes
+ * or generated from the AI pipeline. Recognises:
+ *   • the new split schema: subjective, mental_status_exam, assessment, plan[]
+ *   • legacy combined schema: assessment_and_plan (split into assessment + empty plan)
+ * Returns null for anything else (nested soap_note, structured analyses, etc).
+ */
+const extractProgressNote = (rawJsonOrObj: unknown): ProgressNoteData | null => {
+  let parsed: Record<string, unknown> | null = null;
+  if (typeof rawJsonOrObj === "string") {
+    const trimmed = rawJsonOrObj.trim();
+    if (!trimmed.startsWith("{")) return null;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  } else if (rawJsonOrObj && typeof rawJsonOrObj === "object") {
+    parsed = rawJsonOrObj as Record<string, unknown>;
+  }
+  if (!parsed) return null;
+  // Must be the flat shape — not a wrapped SOAP envelope.
+  if ("soap_note" in parsed) return null;
+
+  const hasAnyFlatField =
+    "subjective" in parsed ||
+    "mental_status_exam" in parsed ||
+    "assessment" in parsed ||
+    "plan" in parsed ||
+    "assessment_and_plan" in parsed;
+  if (!hasAnyFlatField) return null;
+
+  const asStr = (v: unknown, fallback = ""): string =>
+    typeof v === "string" ? v : fallback;
+
+  const rawPlan = parsed.plan;
+  let plan: string[];
+  if (Array.isArray(rawPlan)) {
+    plan = rawPlan.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+  } else if (typeof rawPlan === "string" && rawPlan.trim().length > 0) {
+    // LLM occasionally stringifies against spec — split on common line markers.
+    plan = rawPlan
+      .split(/\n+|(?:^|\s)[-•]\s+/m)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  } else {
+    plan = [];
+  }
+
+  // If the legacy `assessment_and_plan` blob is all we have, surface it as the
+  // assessment text so the clinician can split it up manually. We don't try to
+  // algorithmically infer a plan[] from prose.
+  let assessment = asStr(parsed.assessment);
+  if (!assessment && typeof parsed.assessment_and_plan === "string") {
+    assessment = parsed.assessment_and_plan;
+  }
+
+  const ts = parsed.transcript_summary;
+  const transcriptSummary =
+    ts && typeof ts === "object"
+      ? (ts as ProgressNoteData["transcript_summary"])
+      : undefined;
+
+  return {
+    identifying_data: asStr(parsed.identifying_data),
+    subjective: asStr(parsed.subjective),
+    mental_status_exam: asStr(parsed.mental_status_exam),
+    assessment,
+    plan,
+    transcript_summary: transcriptSummary,
+  };
+};
+
+/** Serialise an edited ProgressNoteData back into the canonical flat JSON shape. */
+const progressNoteToJson = (pn: ProgressNoteData): Record<string, unknown> => ({
+  identifying_data: pn.identifying_data,
+  subjective: pn.subjective,
+  mental_status_exam: pn.mental_status_exam,
+  assessment: pn.assessment,
+  plan: pn.plan,
+  ...(pn.transcript_summary ? { transcript_summary: pn.transcript_summary } : {}),
+});
+
+/** Render a ProgressNoteData as Markdown — for content_markdown, exports, and search. */
+const progressNoteToMarkdown = (pn: ProgressNoteData): string => {
+  const lines: string[] = ["# Progress Note", ""];
+  if (pn.identifying_data && pn.identifying_data !== "Not discussed in this session.") {
+    lines.push("## Identifying Data", "", pn.identifying_data, "");
+  }
+  lines.push("## S — Subjective", "", pn.subjective || "Not discussed in this session.", "");
+  lines.push(
+    "## O — Objective (Mental Status)",
+    "",
+    pn.mental_status_exam || "Not discussed in this session.",
+    "",
+  );
+  lines.push("## A — Assessment", "", pn.assessment || "Not discussed in this session.", "");
+  lines.push("## P — Plan", "");
+  if (pn.plan.length > 0) {
+    for (const item of pn.plan) lines.push(`- ${item}`);
+  } else {
+    lines.push("Not discussed in this session.");
+  }
+  lines.push("");
+  return lines.join("\n");
+};
+
 const formatTime = (seconds: number): string => {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
@@ -161,6 +301,91 @@ const formatTherapistNotes = (notes: string): string => {
 
   try {
     const parsed = JSON.parse(notes);
+
+    // Flat progress-note schema (new: assessment + plan[] split; legacy: assessment_and_plan).
+    // Render as a proper SOAP document so the rich text editor boots with
+    // styled content instead of raw JSON.
+    const isFlatProgressNote =
+      parsed && typeof parsed === 'object' &&
+      !parsed.soap_note &&
+      (parsed.subjective || parsed.mental_status_exam || parsed.assessment || parsed.plan || parsed.assessment_and_plan);
+
+    if (isFlatProgressNote) {
+      const sections: string[] = [];
+      sections.push('# Progress Note');
+      sections.push('');
+
+      if (parsed.identifying_data && parsed.identifying_data !== 'Not discussed in this session.') {
+        sections.push('## Identifying Data');
+        sections.push('');
+        sections.push(parsed.identifying_data);
+        sections.push('');
+      }
+
+      sections.push('## S — Subjective');
+      sections.push('');
+      sections.push(parsed.subjective || 'Not discussed in this session.');
+      sections.push('');
+
+      sections.push('## O — Objective (Mental Status)');
+      sections.push('');
+      sections.push(parsed.mental_status_exam || 'Not discussed in this session.');
+      sections.push('');
+
+      const hasSplit = 'assessment' in parsed || 'plan' in parsed;
+      if (hasSplit) {
+        sections.push('## A — Assessment');
+        sections.push('');
+        sections.push(parsed.assessment || 'Not discussed in this session.');
+        sections.push('');
+
+        sections.push('## P — Plan');
+        sections.push('');
+        const plan = parsed.plan;
+        if (Array.isArray(plan) && plan.length > 0) {
+          for (const item of plan) sections.push(`- ${item}`);
+        } else if (typeof plan === 'string' && plan.trim().length > 0) {
+          sections.push(plan.trim());
+        } else {
+          sections.push('Not discussed in this session.');
+        }
+        sections.push('');
+      } else {
+        sections.push('## A — Assessment & Plan');
+        sections.push('');
+        sections.push(parsed.assessment_and_plan || 'Not discussed in this session.');
+        sections.push('');
+      }
+
+      const ts = parsed.transcript_summary;
+      if (ts && typeof ts === 'object') {
+        sections.push('---');
+        sections.push('');
+        sections.push('## Session Summary');
+        sections.push('');
+        if (Array.isArray(ts.key_themes) && ts.key_themes.length) {
+          sections.push('**Key themes:**');
+          for (const t of ts.key_themes) sections.push(`- ${t}`);
+          sections.push('');
+        }
+        if (Array.isArray(ts.major_events) && ts.major_events.length) {
+          sections.push('**Major events:**');
+          for (const e of ts.major_events) sections.push(`- ${e}`);
+          sections.push('');
+        }
+        if (ts.emotional_tone) {
+          sections.push(`**Emotional tone:** ${ts.emotional_tone}`);
+          sections.push('');
+        }
+        if (Array.isArray(ts.decisions_made) && ts.decisions_made.length) {
+          sections.push('**Decisions made:**');
+          for (const d of ts.decisions_made) sections.push(`- ${d}`);
+          sections.push('');
+        }
+      }
+
+      return sections.join('\n');
+    }
 
     // Check if this is a SOAP note format
     if (parsed.soap_note) {
@@ -663,8 +888,11 @@ export const SessionReviewTimeline = ({
   });
 
   const [isEditing, setIsEditing] = useState(false);
-  const [editData, setEditData] = useState<ClinicalAnalysisData | null>(null);
-  const [editMarkdown, setEditMarkdown] = useState("");
+  const [editHtml, setEditHtml] = useState("");
+  // Structured inline-edit draft for the flat progress-note schema. Non-null
+  // means we are inline-editing S/O/A/P fields directly in the report card;
+  // null means we fall back to the rich-text-editor path (legacy content).
+  const [editProgressNote, setEditProgressNote] = useState<ProgressNoteData | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [transcript, setTranscript] = useState<string | null>(null);
   const [transcriptExpanded, setTranscriptExpanded] = useState(true);
@@ -903,9 +1131,17 @@ export const SessionReviewTimeline = ({
     };
   };
 
-  // Convert flat clinical report format (subjective, mental_status_exam, assessment_and_plan)
-  // into the nested soap_note structure the UI expects
+  // Convert flat clinical report format (subjective, mental_status_exam,
+  // assessment, plan, ...) into the nested soap_note structure the UI expects.
+  // Accepts both the new split schema (`assessment` + `plan` array) and the
+  // legacy `assessment_and_plan` blob for back-compat.
   const convertFlatToSoapFormat = (parsed: any) => {
+    const hasSplit = 'assessment' in parsed || 'plan' in parsed;
+    const planValue = parsed.plan;
+    const planInterventions: string[] = Array.isArray(planValue)
+      ? planValue.filter((s: unknown) => typeof s === 'string' && s.trim().length > 0)
+      : (typeof planValue === 'string' && planValue.trim().length > 0 ? [planValue.trim()] : []);
+
     return {
       soap_note: {
         subjective: {
@@ -920,13 +1156,13 @@ export const SessionReviewTimeline = ({
           clinical_observations: '',
         },
         assessment: {
-          clinical_impressions: parsed.assessment_and_plan || '',
+          clinical_impressions: hasSplit ? (parsed.assessment || '') : (parsed.assessment_and_plan || ''),
           problem_list: [],
           risk_assessment: '',
           progress_notes: '',
         },
         plan: {
-          therapeutic_interventions: [],
+          therapeutic_interventions: planInterventions,
           homework_assignments: [],
           medication_plan: '',
           follow_up: { next_appointment: '', frequency: '', monitoring: '' },
@@ -965,8 +1201,16 @@ export const SessionReviewTimeline = ({
         if (parsed.soap_note) {
           return buildResult(parsed);
         }
-        // Flat format: has subjective/mental_status_exam/assessment_and_plan at top level
-        if (parsed.subjective || parsed.mental_status_exam || parsed.assessment_and_plan) {
+        // Flat progress-note format — matches both the new split schema
+        // (subjective / mental_status_exam / assessment / plan) and the legacy
+        // combined `assessment_and_plan` blob.
+        if (
+          parsed.subjective ||
+          parsed.mental_status_exam ||
+          parsed.assessment ||
+          parsed.plan ||
+          parsed.assessment_and_plan
+        ) {
           const converted = convertFlatToSoapFormat(parsed);
           return buildResult(converted);
         }
@@ -976,30 +1220,60 @@ export const SessionReviewTimeline = ({
   }, [rawNotes, analysis.soap_note, analysis.session_metadata, analysis.clinical_summary]);
 
   const handleStartEdit = () => {
-    if (parsedStructured) {
-      setEditData(JSON.parse(JSON.stringify(parsedStructured))); // deep clone
-    } else {
-      setEditMarkdown(rawNotes);
+    // Preferred path: if the note is a flat progress-note (the current AI
+    // output + what clinicians have edited), edit it in-place in the report
+    // card — no separate Google-Docs page, just inline click-and-type on each
+    // section.
+    if (progressNote) {
+      setEditProgressNote(JSON.parse(JSON.stringify(progressNote)) as ProgressNoteData);
+      setEditHtml("");
+      setIsEditing(true);
+      return;
     }
+
+    // Fallback: unrecognised shape (legacy structured analyses, custom blobs).
+    // Hand those to the rich text editor so nothing becomes un-editable.
+    const previousHtml =
+      (clinicalNote?.content_json as { _edited_html?: string } | null)?._edited_html ?? null;
+    const initialHtml = previousHtml && previousHtml.trim().length > 0
+      ? previousHtml
+      : markdownToHtml(formatTherapistNotes(rawNotes));
+    setEditHtml(initialHtml);
+    setEditProgressNote(null);
     setIsEditing(true);
   };
 
-  // v1 autosave: while the editor is open, every change to editData/editMarkdown
-  // is debounced-written to clinical_notes. Source of truth shifts from
-  // session_analysis to clinical_notes the moment the clinician edits.
+  // v1 autosave: while the editor is open, every keystroke is debounced-written
+  // to clinical_notes. Source of truth shifts from session_analysis to
+  // clinical_notes the moment the clinician edits.
   useEffect(() => {
     if (!isEditing) return;
     if (!patientId || !therapistId) return; // need these to write
 
-    const contentJson: Record<string, unknown> = editData
-      ? (editData as unknown as Record<string, unknown>)
-      : { _raw_markdown: editMarkdown };
-    const contentMarkdown = editData ? JSON.stringify(editData) : editMarkdown;
+    let contentJson: Record<string, unknown>;
+    let contentMarkdown: string;
+    if (editProgressNote) {
+      // Inline progress-note edit — preserve the clinician's exact JSON (so we
+      // can round-trip back into the structured editor on reopen) plus a
+      // markdown rendering for export / content_markdown storage.
+      const markdown = progressNoteToMarkdown(editProgressNote);
+      contentJson = {
+        _edited_progress_note: progressNoteToJson(editProgressNote),
+        _edited_markdown: markdown,
+      };
+      contentMarkdown = markdown;
+    } else {
+      // Rich text editor fallback — persist HTML (faithful re-render) plus
+      // a markdown conversion for export, search, and back-compat.
+      const markdown = htmlToMarkdown(editHtml);
+      contentJson = { _edited_html: editHtml, _edited_markdown: markdown };
+      contentMarkdown = markdown;
+    }
 
     autosave.save(contentJson, contentMarkdown);
     // autosave is stable via useCallback refs; no need to depend on it
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEditing, editData, editMarkdown, patientId, therapistId]);
+  }, [isEditing, editHtml, editProgressNote, patientId, therapistId]);
 
   const handleSaveEdit = async () => {
     setIsSaving(true);
@@ -1013,10 +1287,20 @@ export const SessionReviewTimeline = ({
 
       // Optimistically reflect the edit in the local clinical_notes state so the
       // rendered (non-editing) view shows the new content without a round-trip.
-      const contentJson: Record<string, unknown> = editData
-        ? (editData as unknown as Record<string, unknown>)
-        : { _raw_markdown: editMarkdown };
-      const contentMarkdown = editData ? JSON.stringify(editData) : editMarkdown;
+      let contentJson: Record<string, unknown>;
+      let contentMarkdown: string;
+      if (editProgressNote) {
+        const markdown = progressNoteToMarkdown(editProgressNote);
+        contentJson = {
+          _edited_progress_note: progressNoteToJson(editProgressNote),
+          _edited_markdown: markdown,
+        };
+        contentMarkdown = markdown;
+      } else {
+        const markdown = htmlToMarkdown(editHtml);
+        contentJson = { _edited_html: editHtml, _edited_markdown: markdown };
+        contentMarkdown = markdown;
+      }
       setClinicalNote((prev) => ({
         id: prev?.id ?? "pending",
         content_json: contentJson,
@@ -1026,7 +1310,8 @@ export const SessionReviewTimeline = ({
       }));
 
       setIsEditing(false);
-      setEditData(null);
+      setEditHtml("");
+      setEditProgressNote(null);
     } finally {
       setIsSaving(false);
     }
@@ -1070,8 +1355,33 @@ export const SessionReviewTimeline = ({
     toast.success(`Transcript downloaded as .${format}`);
   }, [transcript, analysis]);
 
+  // When the clinician has edited via the rich text editor we persist the HTML
+  // to clinical_notes.content_json._edited_html. In that case we render the
+  // edited HTML verbatim and short-circuit the AI-generated SOAP/structured
+  // renderers so the clinician's edits are the source of truth.
+  const editedHtml: string | null = useMemo(() => {
+    const maybe = (clinicalNote?.content_json as { _edited_html?: unknown } | null)?._edited_html;
+    return typeof maybe === "string" && maybe.trim().length > 0 ? maybe : null;
+  }, [clinicalNote]);
+
+  // Clinician's inline-edited progress note, when present. Takes precedence
+  // over the AI version.
+  const editedProgressNote: ProgressNoteData | null = useMemo(() => {
+    const maybe = (clinicalNote?.content_json as { _edited_progress_note?: unknown } | null)
+      ?._edited_progress_note;
+    return maybe ? extractProgressNote(maybe) : null;
+  }, [clinicalNote]);
+
+  // The effective progress note to render: clinician edit wins, else we try
+  // to parse a flat progress note out of the AI output. Returns null for
+  // anything that isn't flat schema (SOAP envelopes, structured analyses).
+  const progressNote: ProgressNoteData | null = useMemo(() => {
+    if (editedProgressNote) return editedProgressNote;
+    return extractProgressNote(rawNotes);
+  }, [editedProgressNote, rawNotes]);
+
   const llmNotes = formatTherapistNotes(rawNotes);
-  const structuredAnalysis = parsedStructured;
+  const structuredAnalysis = editedHtml || editedProgressNote ? null : parsedStructured;
 
   const handleExportNote = useCallback((format: "pdf" | "doc") => {
     const title = analysis.session_videos?.title || "Session";
@@ -1137,7 +1447,11 @@ export const SessionReviewTimeline = ({
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() => { setIsEditing(false); setEditData(null); }}
+                      onClick={() => {
+                        setIsEditing(false);
+                        setEditHtml("");
+                        setEditProgressNote(null);
+                      }}
                       className="h-7 text-xs text-slate-300 hover:bg-slate-700 hover:text-white"
                     >
                       <X className="h-3 w-3" />
@@ -1305,8 +1619,24 @@ export const SessionReviewTimeline = ({
                   </div>
                 )}
 
-                {/* SOAP NOTES SECTION */}
-                {soapData?.soap_note && (
+                {/* Inline progress-note editor — replaces the SOAP cards when the
+                    note is in the flat S/O/A/P schema. Renders both read-only
+                    and inline-edit modes from the same component. */}
+                {progressNote && !editedHtml && !isEditing && (
+                  <ProgressNoteCard data={progressNote} editable={false} />
+                )}
+                {isEditing && editProgressNote && (
+                  <ProgressNoteCard
+                    data={editProgressNote}
+                    editable
+                    onChange={setEditProgressNote}
+                  />
+                )}
+
+                {/* Legacy wrapped SOAP-envelope rendering — only when the
+                    clinician hasn't taken over via HTML edits AND the note
+                    isn't already handled by ProgressNoteCard above. */}
+                {!editedHtml && !progressNote && soapData?.soap_note && (
                   <div className="border border-slate-300 bg-white mb-6">
                     <div className="bg-slate-900 px-4 py-2.5 border-b border-slate-800 flex items-center justify-between">
                       <h3 className="text-xs font-semibold text-white uppercase tracking-wider">
@@ -1770,21 +2100,31 @@ export const SessionReviewTimeline = ({
                 )}
 
 
-                {isEditing ? (
-                  <div className="space-y-3">
-                    {editData ? (
-                      <ClinicalDocEditor data={editData} onChange={setEditData} />
-                    ) : (
-                      <>
-                        <p className="text-xs text-slate-500">Edit the clinical documentation content below.</p>
-                        <Textarea
-                          value={editMarkdown}
-                          onChange={(e) => setEditMarkdown(e.target.value)}
-                          className="min-h-[60vh] text-xs resize-none"
-                          autoFocus
-                        />
-                      </>
-                    )}
+                {isEditing && !editProgressNote ? (
+                  <RichTextEditor
+                    initialHtml={editHtml}
+                    onChange={setEditHtml}
+                    placeholder="Edit the clinical documentation…"
+                    autoFocus
+                  />
+                ) : editedHtml && !isEditing ? (
+                  <div className="flex flex-col items-center bg-slate-100 py-6 -mx-6 px-6">
+                    <div className="w-full max-w-[850px]">
+                      <div
+                        className="rounded border border-slate-300 bg-white px-[72px] py-[60px] shadow-sm
+                          prose prose-slate max-w-none
+                          prose-headings:font-semibold prose-headings:text-slate-900
+                          prose-h1:text-2xl prose-h1:mt-6 prose-h1:mb-3 prose-h1:pb-2 prose-h1:border-b prose-h1:border-slate-200
+                          prose-h2:text-xl prose-h2:mt-5 prose-h2:mb-2
+                          prose-h3:text-base prose-h3:mt-4 prose-h3:mb-2
+                          prose-p:text-sm prose-p:leading-relaxed prose-p:text-slate-800 prose-p:my-2
+                          prose-ul:my-2 prose-ol:my-2 prose-li:text-sm prose-li:text-slate-800
+                          prose-strong:text-slate-900
+                          prose-blockquote:border-l-4 prose-blockquote:border-slate-300 prose-blockquote:bg-slate-50 prose-blockquote:py-1 prose-blockquote:px-4 prose-blockquote:not-italic prose-blockquote:text-slate-700
+                          prose-hr:my-6 prose-hr:border-slate-200"
+                        dangerouslySetInnerHTML={{ __html: editedHtml }}
+                      />
+                    </div>
                   </div>
                 ) : rawNotes && rawNotes !== NO_LLM_NOTES_PLACEHOLDER ? (
                   <>

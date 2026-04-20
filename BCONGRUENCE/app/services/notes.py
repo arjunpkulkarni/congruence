@@ -406,20 +406,43 @@ def _convert_notes_to_markdown(notes: Dict[str, Any]) -> str:
     lines.append(notes.get("identifying_data", "Not discussed in this session."))
     lines.append("")
 
-    lines.append("## Subjective")
+    lines.append("## S — Subjective")
     lines.append("")
     lines.append(notes.get("subjective", "Not discussed in this session."))
     lines.append("")
 
-    lines.append("## Mental Status Exam")
+    lines.append("## O — Objective (Mental Status)")
     lines.append("")
     lines.append(notes.get("mental_status_exam", "Not discussed in this session."))
     lines.append("")
 
-    lines.append("## Assessment & Plan")
-    lines.append("")
-    lines.append(notes.get("assessment_and_plan", "Not discussed in this session."))
-    lines.append("")
+    # Prefer the new split schema (assessment + plan). Fall back to the legacy
+    # `assessment_and_plan` blob for older notes so we don't regress rendering.
+    assessment_text = notes.get("assessment")
+    plan_value = notes.get("plan")
+
+    if assessment_text is None and plan_value is None:
+        lines.append("## A — Assessment & Plan")
+        lines.append("")
+        lines.append(notes.get("assessment_and_plan", "Not discussed in this session."))
+        lines.append("")
+    else:
+        lines.append("## A — Assessment")
+        lines.append("")
+        lines.append(assessment_text or "Not discussed in this session.")
+        lines.append("")
+
+        lines.append("## P — Plan")
+        lines.append("")
+        if isinstance(plan_value, list) and plan_value:
+            for item in plan_value:
+                lines.append(f"- {item}")
+        elif isinstance(plan_value, str) and plan_value.strip():
+            # LLM sometimes stringifies the list against the schema — degrade gracefully.
+            lines.append(plan_value.strip())
+        else:
+            lines.append("Not discussed in this session.")
+        lines.append("")
 
     # ── Transcript Summary ──
     _append_transcript_summary(lines, notes)
