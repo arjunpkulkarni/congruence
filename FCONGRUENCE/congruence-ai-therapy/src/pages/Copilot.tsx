@@ -5,7 +5,7 @@ import { MobileContextDrawer } from "@/components/copilot/MobileContextDrawer";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { agentAPI } from "@/lib/copilot-api";
-import { Loader2, AlertCircle, RotateCcw, PanelLeftClose, PanelLeft } from "lucide-react";
+import { Loader2, AlertCircle, PanelLeftClose, PanelLeft } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import congruenceLogo from "@/assets/congruence-logo.png";
 

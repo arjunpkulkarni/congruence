@@ -8,7 +8,7 @@ import { RightPanel } from "./RightPanel";
 import { agentAPI, AgentAction, ChatRequest } from "@/lib/copilot-api";
 import { CopilotDB, Conversation } from "@/lib/copilot-db";
 import { supabase } from "@/integrations/supabase/client";
-import { Send, Paperclip } from "lucide-react";
+import { Send } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 interface ChatInterfaceProps {
@@ -27,7 +27,8 @@ const STORAGE_KEY = 'congruence_copilot_messages';
 const CONTEXT_STORAGE_KEY = 'congruence_copilot_context';
 const CONVERSATION_ID_KEY = 'congruence_copilot_conversation_id';
 
-export const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ userId, role, onConversationChange }, ref) => {
+export const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(
+  ({ userId, role, onConversationChange }, ref) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -49,55 +50,75 @@ export const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({
           return;
         }
 
-        // Try to load from localStorage first (instant UX)
         const savedConvId = localStorage.getItem(CONVERSATION_ID_KEY);
-        const savedMessages = localStorage.getItem(STORAGE_KEY);
-        const savedContext = localStorage.getItem(CONTEXT_STORAGE_KEY);
+        const savedMessagesRaw = localStorage.getItem(STORAGE_KEY);
+        const savedContextRaw = localStorage.getItem(CONTEXT_STORAGE_KEY);
 
-        if (savedMessages) {
-          const parsed = JSON.parse(savedMessages) as ChatMessage[];
-          const messagesWithDates = parsed.map((msg) => ({
-            ...msg,
-            timestamp: new Date(msg.timestamp)
-          }));
-          setMessages(messagesWithDates);
+        let initialMessages: ChatMessage[] = [];
+
+        if (savedMessagesRaw) {
+          try {
+            const parsed = JSON.parse(savedMessagesRaw) as ChatMessage[];
+            initialMessages = parsed.map((msg) => ({
+              ...msg,
+              timestamp: new Date(msg.timestamp),
+            }));
+          } catch {
+            initialMessages = [];
+          }
         }
 
-        if (savedContext) {
-          setContext(JSON.parse(savedContext));
+        if (savedContextRaw) {
+          try {
+            setContext(JSON.parse(savedContextRaw));
+          } catch {
+            /* noop */
+          }
         }
 
-        // Then sync with database
         let conversation: Conversation | null = null;
+        const savedLsCount = savedMessagesRaw
+          ? (() => {
+              try {
+                return (JSON.parse(savedMessagesRaw) as unknown[]).length;
+              } catch {
+                return 0;
+              }
+            })()
+          : 0;
 
         if (savedConvId) {
-          // Try to load the saved conversation from DB
           const dbMessages = await CopilotDB.getMessages(savedConvId);
           if (dbMessages.length > 0) {
             conversation = { id: savedConvId } as Conversation;
-            // Only update if DB has more messages than localStorage
-            if (dbMessages.length > (savedMessages ? JSON.parse(savedMessages).length : 0)) {
-              setMessages(dbMessages);
+            if (dbMessages.length > savedLsCount) {
+              initialMessages = dbMessages.map((msg) => ({
+                ...msg,
+                timestamp: new Date(msg.timestamp),
+              }));
             }
           }
         }
 
         if (!conversation) {
-          // Load most recent conversation or create new one
           conversation = await CopilotDB.getMostRecentConversation(user.id);
-          
+
           if (conversation) {
             const dbMessages = await CopilotDB.getMessages(conversation.id);
-            setMessages(dbMessages);
+            initialMessages = dbMessages.map((msg) => ({
+              ...msg,
+              timestamp: new Date(msg.timestamp),
+            }));
             setContext({
               selected_patient: conversation.patient_id || undefined,
               selected_session: conversation.appointment_id || undefined,
             });
           } else {
-            // Create new conversation
             conversation = await CopilotDB.createConversation(user.id);
           }
         }
+
+        setMessages(initialMessages);
 
         if (conversation) {
           setConversationId(conversation.id);
@@ -171,6 +192,7 @@ export const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({
           localStorage.setItem(CONVERSATION_ID_KEY, newConversation.id);
           localStorage.removeItem(STORAGE_KEY);
           localStorage.removeItem(CONTEXT_STORAGE_KEY);
+
           onConversationChange?.(newConversation.id);
           
           toast({
@@ -329,8 +351,6 @@ export const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({
   };
 
   const handleActionClick = (action: AgentAction) => {
-    // For now, send the action label as a follow-up message
-    // In a real implementation, you might want to handle specific action types differently
     handleSendMessage(`Execute: ${action.label}`);
   };
 
@@ -415,6 +435,7 @@ export const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({
       </div>
     </div>
   );
-});
+  }
+);
 
 ChatInterface.displayName = 'ChatInterface';

@@ -216,6 +216,7 @@ const PatientWorkspace = () => {
   if (!patient) return null;
 
   const workflowSteps = [
+    { id: "intake", label: "Intake", subtitle: "Consent, assessments & forms", count: stats.surveys },
     { id: "recordings", label: "Recordings", subtitle: "Session videos & audio", count: stats.videos },
     { id: "analysis", label: "Analysis Review", subtitle: "AI insights & reports", count: stats.sessions },
     { id: "insurance", label: "Insurance", subtitle: "Claims & documentation", count: 0 },
@@ -381,7 +382,7 @@ const PatientWorkspace = () => {
       {/* BAND 2: Workflow Status Bar */}
       <div className="bg-white border-b border-slate-200">
         <div className="w-full">
-          <div className="grid grid-cols-3 divide-x divide-slate-100 w-full">
+          <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-slate-100 w-full">
             {workflowSteps.map((step) => {
               const isActive = activeTab === step.id;
               const isCompleted = step.count > 0;

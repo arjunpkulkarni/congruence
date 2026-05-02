@@ -1,0 +1,4 @@
+# Local test media (large); do not commit or push
+TESTVIDEOS/
+
+.DS_Store

@@ -114,6 +114,21 @@ export function AppSidebar({ currentUser }: AppSidebarProps) {
             </div>
             <SidebarGroupContent>
               <SidebarMenu>
+                {(isSuperAdmin || featureFlags.demoMode) && featureFlags.copilot && (
+                  <SidebarMenuItem>
+                    <SidebarMenuButton asChild>
+                      <NavLink
+                        to="/copilot"
+                        end
+                        className="group flex items-center gap-3 rounded-md px-4 py-2 text-sm text-muted-foreground transition-colors"
+                        activeClassName="bg-sidebar-accent text-foreground shadow-sm"
+                      >
+                        <Bot className="h-4 w-4 opacity-80 group-hover:opacity-100" />
+                        <span className="truncate">Agent</span>
+                      </NavLink>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                )}
                 {primaryNav.map((item) => (
                   <SidebarMenuItem key={item.title}>
                     <SidebarMenuButton asChild>
@@ -129,7 +144,7 @@ export function AppSidebar({ currentUser }: AppSidebarProps) {
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 ))}
-                {(isAdmin || isSuperAdmin) && adminOnlyNav.map((item) => (
+                {(isAdmin || isSuperAdmin || featureFlags.demoMode) && adminOnlyNav.map((item) => (
                   <SidebarMenuItem key={item.title}>
                     <SidebarMenuButton asChild>
                       <NavLink
@@ -144,21 +159,6 @@ export function AppSidebar({ currentUser }: AppSidebarProps) {
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 ))}
-                {isSuperAdmin && featureFlags.copilot && (
-                  <SidebarMenuItem>
-                    <SidebarMenuButton asChild>
-                      <NavLink
-                        to="/copilot"
-                        end
-                        className="group flex items-center gap-3 rounded-md px-4 py-2 text-sm text-muted-foreground transition-colors"
-                        activeClassName="bg-sidebar-accent text-foreground shadow-sm"
-                      >
-                        <Bot className="h-4 w-4 opacity-80 group-hover:opacity-100" />
-                        <span className="truncate">Agent</span>
-                      </NavLink>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                )}
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
